@@ -1,0 +1,192 @@
+#!/bin/bash
+
+## MIT LICENCE ##
+# Copyright (c) 2020 Sandi Wallendahl <sandi@redhat.com>, Red Hat Inc.
+
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+
+# The above copyright notice and this permission notice shall be included
+# in all copies or substantial portions of the Software.
+
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+# EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+# IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+# TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+##
+
+exit_value=0
+
+trap 'echo INFO: $(date): $0: Finished with exit code: $exit_value' EXIT
+
+progname="$(basename $0)"
+
+logfile="./top-mem-util.log.xz"
+interval=10
+processes=20
+timeout=0
+
+
+function usage() {
+  sed -e "s/^    //" -e "s|PROGNAME|$progname|" <<"____EOF"
+    USAGE
+
+        PROGNAME [OPTION...]
+
+    DESCRIPTION
+
+        Logs processes with a high memory foot-print to a xz compressed
+        log file in every N seconds.
+
+    OPTIONS
+
+        -f|--file <file>
+            File to use for logging. Defaults to: $logfile
+
+        -i|--interval <seconds>
+            Interval in seconds to wait between logging memory utilization.
+            Defaults to $interval.
+
+        -p|--processes <number of processes>
+            Amount of top memory processes to log. Defaults to $processes.
+
+        -t|--timeout <minutes>
+            Amount of minutes memory utilization data is logged.
+            Value 0 implies that logging will continue infinitely until
+            this program is killed or CTRL-C is pressed. Defaults to 0.
+
+        -h|--help
+            Print this usage and exit graciously.
+
+    EXAMPLES
+
+        PROGNAME -f /var/log/memutil.log.xz -i 5 -p 10 -t 90
+              Logs top 10 memory users every 5 seconds for 1.5 hours
+              to file /var/log/memutil.log.xz
+  
+        nohup PROGNAME -f /var/log/memutil.log.xz -i 5 -p 10 -t 90 &
+              As above, but launches the program to background permanently,
+              until timeout or SIGTERM occurs.
+
+    LOG FORMAT
+
+        The format is: EPOCH RSS SIZE VSZ PID CMD, sorted first by EPOCH and
+        then by RSS.
+
+    NOTES
+
+       - To read the log file, you need to use xz tools like xzcat or xzless.
+ 
+       - The script always appends to the file it's writing to and never
+         clears previous entries out. Thus, if user logs data to the same file
+         in more than one run, all logging data is preserved between runs.
+
+____EOF
+}
+
+function log_process_memory_consumption() {
+  local logfile=$1
+  local interval=$2
+  local processes=$3
+  while true; do
+    ps -e -orss=,size=,vsz=,pid=,cmd= --sort=rss | \
+      tail -n"$processes" | \
+      xargs -s1048576 -I'{}' bash -c 'echo $(date "+%s") "{}"' | \
+      xz >> "$logfile"
+    sleep "$interval"
+  done
+}
+
+if [[ $@ != "" ]]; then
+  while [[ $# > 0 ]]; do
+    case "$1" in
+      -f|--file)
+        shift; logfile="$1"; shift ;;
+      -i|--interval)
+        shift; interval="$1"; shift ;;
+      -p|--processes)
+        shift; processes="$1"; shift ;;
+      -t|--timeout)
+        shift; timeout="$1"; shift ;;
+      -h|--help)
+        usage; exit_value=0; exit $exit_value ;;
+      *)
+        usage
+        echo "ERROR: Unknown argument: $1" 1>&2
+        exit_value=1
+        exit $exit_value
+        ;;
+    esac
+  done
+fi
+
+if [[ $logfile == "" ]]; then
+  logfile="$(pwd)/top-mem-util.log.xz"
+fi
+
+if [[ -d "$logfile" ]]; then
+  echo "ERROR: Cannot write to logfile: '$logfile',
+        it's a directory" 1>&2
+  exit_value=1
+  exit $exit_value
+fi
+
+if ! touch "$logfile"; then
+  echo "ERROR: Cannot write to logfile: $logfile" 1>&2
+  exit_value=1
+  exit $exit_value
+fi
+
+if [[ $interval =~ ^[^0-9]$ ]]; then
+  usage
+  echo "ERROR: Illegal argument for interval: '$interval',
+        must be a number higher than 0" 1>&2
+  exit_value=1
+  exit $exit_value
+fi
+
+if [[ $processes =~ ^[^0-9]$ ]] || [[ $processes < 1 ]] ; then
+  usage
+  echo "ERROR: Illegal argument for processes: '$processes',
+        must be a number higher than 0" 1>&2
+  exit_value=1
+  exit $exit_value
+fi
+
+if [[ $timeout =~ ^[^0-9]$ ]]; then
+  usage
+  echo "ERROR: Illegal argument for interval: '$timeout',
+        must be a number" 1>&2
+  exit_value=1
+  exit $exit_value
+fi
+
+let "timeout_seconds = $timeout * 60"
+
+echo "Logging memory usage with following options:
+  Log file:            $logfile
+  Interval in seconds: $interval
+  Number of processes: $processes
+  Timeout in minutes:  $timeout
+  Timeout in seconds:  $timeout_seconds
+
+  Use CTRL-C to exit.
+"
+
+if [[ $timeout > 0 ]]; then
+  export -f log_process_memory_consumption
+  timeout $timeout_seconds \
+    bash -c "log_process_memory_consumption $logfile $interval $processes"
+else
+  log_process_memory_consumption $logfile $interval $processes
+fi
+
+exit $exit_value
